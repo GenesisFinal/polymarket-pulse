@@ -196,7 +196,8 @@ def get_events(limit: int = 100, category: Optional[str] = None, search: Optiona
         try:
             search_res = _fetch_with_doh(f"{GAMMA_API_BASE}/public-search", params={
                 "q": search.strip(),
-                "events_status": "active"
+                "events_status": "active",
+                "limit_per_type": 50
             })
             raw_events = search_res.get("events", []) if isinstance(search_res, dict) else []
         except Exception as e:
@@ -209,7 +210,8 @@ def get_events(limit: int = 100, category: Optional[str] = None, search: Optiona
             for q in ["argentina", "milei"]:
                 res = _fetch_with_doh(f"{GAMMA_API_BASE}/public-search", params={
                     "q": q,
-                    "events_status": "active"
+                    "events_status": "active",
+                    "limit_per_type": 50
                 })
                 for ev in (res.get("events", []) if isinstance(res, dict) else []):
                     if ev.get("id") not in seen_ids:
@@ -218,32 +220,25 @@ def get_events(limit: int = 100, category: Optional[str] = None, search: Optiona
         except Exception as e:
             logger.error(f"Error fetching Argentina markets: {e}")
     else:
-        # Standard discovery: fetch active events ordered by 24h volume
-        params = {
-            "limit": min(limit, 120),
-            "active": "true",
-            "closed": "false",
-            "order": "volume24hr",
-            "ascending": "false"
-        }
-        raw_events = _fetch_with_doh(f"{GAMMA_API_BASE}/events", params=params)
-        
-        # Also fetch top overall volume events to capture broad markets
-        try:
-            top_vol_events = _fetch_with_doh(f"{GAMMA_API_BASE}/events", params={
-                "limit": 40,
-                "active": "true",
-                "closed": "false",
-                "order": "volume",
-                "ascending": "false"
-            })
-            existing_ids = {e.get("id") for e in raw_events}
-            for e in top_vol_events:
-                if e.get("id") not in existing_ids:
-                    raw_events.append(e)
-                    existing_ids.add(e.get("id"))
-        except Exception as e:
-            logger.warning(f"Could not fetch supplementary top volume events: {e}")
+        # Standard discovery: fetch up to 300 active events across pages
+        seen_ids = set()
+        for off in [0, 100, 200]:
+            try:
+                page_events = _fetch_with_doh(f"{GAMMA_API_BASE}/events", params={
+                    "limit": 100,
+                    "offset": off,
+                    "active": "true",
+                    "closed": "false",
+                    "order": "volume24hr",
+                    "ascending": "false"
+                })
+                for ev in page_events:
+                    if ev.get("id") not in seen_ids:
+                        raw_events.append(ev)
+                        seen_ids.add(ev.get("id"))
+            except Exception as e:
+                logger.warning(f"Error fetching page offset {off}: {e}")
+                break
 
     # Normalize events
     normalized = []
