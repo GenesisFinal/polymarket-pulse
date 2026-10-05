@@ -100,9 +100,15 @@ if os.path.exists(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
-@app.get("/")
-async def serve_index():
+@app.get("/{filename:path}")
+async def serve_static_root(filename: str):
+    if not filename:
+        filename = "index.html"
+    file_path = os.path.join(STATIC_DIR, filename)
+    if os.path.isfile(file_path):
+        return FileResponse(file_path)
+    # Default fallback to index.html for SPA
     index_path = os.path.join(STATIC_DIR, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
-    return JSONResponse({"message": "Frontend static files not yet initialized."})
+    return JSONResponse({"message": "File not found"}, status_code=404)
