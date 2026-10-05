@@ -27,6 +27,7 @@ let currentCategory = "trending";
 let searchQuery = "";
 let sortBy = "volume24hr";
 let allLoadedEvents = [];
+let currentOffset = 300;
 let favorites = new Set(JSON.parse(localStorage.getItem("poly_favorites") || "[]"));
 
 // Modal State
@@ -53,6 +54,12 @@ function setupEventListeners() {
   const clearSearchBtn = document.getElementById("clearSearchBtn");
   const refreshBtn = document.getElementById("refreshBtn");
   const sortSelect = document.getElementById("sortSelect");
+
+  // Load more button
+  const loadMoreBtn = document.getElementById("loadMoreBtn");
+  if (loadMoreBtn) {
+    loadMoreBtn.addEventListener("click", loadMoreMarkets);
+  }
 
   // Debounced search
   let searchTimeout = null;
@@ -273,10 +280,10 @@ async function loadMarkets(silent = false) {
     // 2. If running on Netlify (or local server not running):
     if (events.length === 0) {
       if (searchQuery) {
-        // Full-text search across all Polymarket events via public-search!
+        // Full-text search across all Polymarket events via public-search with limit_per_type=50!
         const searchUrls = [
-          `/api/gamma/public-search?q=${encodeURIComponent(searchQuery)}&events_status=active`,
-          `https://gamma-api.polymarket.com/public-search?q=${encodeURIComponent(searchQuery)}&events_status=active`
+          `/api/gamma/public-search?q=${encodeURIComponent(searchQuery)}&events_status=active&limit_per_type=50`,
+          `https://gamma-api.polymarket.com/public-search?q=${encodeURIComponent(searchQuery)}&events_status=active&limit_per_type=50`
         ];
 
         for (const surl of searchUrls) {
@@ -293,12 +300,12 @@ async function loadMarkets(silent = false) {
           }
         }
       } else if (currentCategory === "argentina") {
-        // Specifically fetch Argentina and Milei markets via public-search to ensure all are found!
+        // Specifically fetch Argentina and Milei markets via public-search with limit_per_type=50!
         const seenIds = new Set();
         const argQueries = ["argentina", "milei"];
         for (const aq of argQueries) {
           try {
-            const resp = await fetch(`/api/gamma/public-search?q=${aq}&events_status=active`);
+            const resp = await fetch(`/api/gamma/public-search?q=${aq}&events_status=active&limit_per_type=50`);
             if (resp.ok) {
               const resData = await resp.json();
               const rawList = resData.events || [];
@@ -316,25 +323,32 @@ async function loadMarkets(silent = false) {
           } catch (e) {}
         }
       } else {
-        // Standard browse: fetch top active volume events
-        const endpoints = [
-          "/api/gamma/events?limit=80&active=true&closed=false&order=volume24hr&ascending=false",
-          "https://gamma-api.polymarket.com/events?limit=80&active=true&closed=false&order=volume24hr&ascending=false"
-        ];
+        // Standard browse: fetch up to 300 active events in parallel across 3 pages (offsets 0, 100, 200)
+        try {
+          currentOffset = 300;
+          const pagePromises = [0, 100, 200].map(off =>
+            fetch(`/api/gamma/events?limit=100&offset=${off}&active=true&closed=false&order=volume24hr&ascending=false`)
+              .then(r => r.ok ? r.json() : [])
+              .catch(() => [])
+          );
+          const pageResults = await Promise.all(pagePromises);
+          const seenIds = new Set();
 
-        for (const endpoint of endpoints) {
-          try {
-            const resp = await fetch(endpoint);
-            if (resp.ok) {
-              const rawData = await resp.json();
-              if (Array.isArray(rawData)) {
-                events = rawData.map(normalizeRawGammaEvent).filter(e => e.markets && e.markets.length > 0);
-                break;
+          for (const plist of pageResults) {
+            if (Array.isArray(plist)) {
+              for (const raw of plist) {
+                if (!seenIds.has(raw.id)) {
+                  seenIds.add(raw.id);
+                  const norm = normalizeRawGammaEvent(raw);
+                  if (norm.markets && norm.markets.length > 0) {
+                    events.push(norm);
+                  }
+                }
               }
             }
-          } catch (err) {
-            // try next endpoint
           }
+        } catch (err) {
+          console.error("Error fetching multi-page events:", err);
         }
 
         // Filter client-side if a specific category was selected
@@ -372,6 +386,7 @@ function sortAndRenderEvents() {
   const grid = document.getElementById("marketsGrid");
   const emptyState = document.getElementById("emptyState");
   const countBadge = document.getElementById("marketCount");
+  const loadMoreContainer = document.getElementById("loadMoreContainer");
 
   // Apply sorting
   const events = [...allLoadedEvents].sort((a, b) => {
@@ -381,6 +396,15 @@ function sortAndRenderEvents() {
   });
 
   countBadge.innerText = events.length;
+
+  // Show or hide Load More button
+  if (loadMoreContainer) {
+    if (searchQuery || currentCategory === "watchlist" || currentCategory === "argentina" || events.length === 0) {
+      loadMoreContainer.classList.add("hidden");
+    } else {
+      loadMoreContainer.classList.remove("hidden");
+    }
+  }
 
   if (events.length === 0) {
     grid.classList.add("hidden");
@@ -393,6 +417,55 @@ function sortAndRenderEvents() {
 
   grid.innerHTML = events.map((event) => renderEventCard(event)).join("");
   lucide.createIcons();
+}
+
+// Load more markets on user request
+async function loadMoreMarkets() {
+  const btn = document.getElementById("loadMoreBtn");
+  const text = document.getElementById("loadMoreText");
+  const originalText = text.innerText;
+
+  text.innerText = "Cargando más...";
+  btn.disabled = true;
+
+  try {
+    const resp = await fetch(`/api/gamma/events?limit=100&offset=${currentOffset}&active=true&closed=false&order=volume24hr&ascending=false`);
+    if (resp.ok) {
+      const data = await resp.json();
+      if (Array.isArray(data) && data.length > 0) {
+        const existingIds = new Set(allLoadedEvents.map(e => e.id));
+        let addedCount = 0;
+
+        for (const raw of data) {
+          if (!existingIds.has(raw.id)) {
+            existingIds.add(raw.id);
+            const norm = normalizeRawGammaEvent(raw);
+            if (norm.markets && norm.markets.length > 0) {
+              if (currentCategory === "all" || currentCategory === "trending" || norm.category === currentCategory) {
+                allLoadedEvents.push(norm);
+                addedCount++;
+              }
+            }
+          }
+        }
+
+        currentOffset += 100;
+        sortAndRenderEvents();
+      } else {
+        text.innerText = "No hay más mercados";
+        setTimeout(() => {
+          const lmc = document.getElementById("loadMoreContainer");
+          if (lmc) lmc.classList.add("hidden");
+        }, 1500);
+      }
+    }
+  } catch (err) {
+    console.error("Error loading more markets:", err);
+  } finally {
+    text.innerText = originalText;
+    btn.disabled = false;
+    lucide.createIcons();
+  }
 }
 
 // Render a single market card
