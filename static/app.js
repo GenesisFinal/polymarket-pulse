@@ -270,40 +270,77 @@ async function loadMarkets(silent = false) {
       // Local server not available, will use Netlify proxy below
     }
 
-    // 2. If no events from local server, use Netlify proxy or direct Gamma API
+    // 2. If running on Netlify (or local server not running):
     if (events.length === 0) {
-      const endpoints = [
-        "/api/gamma/events?limit=80&active=true&closed=false&order=volume24hr&ascending=false",
-        "https://gamma-api.polymarket.com/events?limit=80&active=true&closed=false&order=volume24hr&ascending=false"
-      ];
-
-      for (const endpoint of endpoints) {
-        try {
-          const resp = await fetch(endpoint);
-          if (resp.ok) {
-            const rawData = await resp.json();
-            if (Array.isArray(rawData)) {
-              events = rawData.map(normalizeRawGammaEvent).filter(e => e.markets && e.markets.length > 0);
-              break;
-            }
-          }
-        } catch (err) {
-          // try next endpoint
-        }
-      }
-
-      // Filter client-side
-      if (currentCategory !== "all" && currentCategory !== "trending" && currentCategory !== "watchlist") {
-        events = events.filter(e => e.category === currentCategory);
-      }
-
       if (searchQuery) {
-        const sq = searchQuery.toLowerCase();
-        events = events.filter(e => {
-          const title = (e.title || "").toLowerCase();
-          const q = (e.markets && e.markets[0] ? e.markets[0].question : "").toLowerCase();
-          return title.includes(sq) || q.includes(sq);
-        });
+        // Full-text search across all Polymarket events via public-search!
+        const searchUrls = [
+          `/api/gamma/public-search?q=${encodeURIComponent(searchQuery)}&events_status=active`,
+          `https://gamma-api.polymarket.com/public-search?q=${encodeURIComponent(searchQuery)}&events_status=active`
+        ];
+
+        for (const surl of searchUrls) {
+          try {
+            const resp = await fetch(surl);
+            if (resp.ok) {
+              const resData = await resp.json();
+              const rawList = resData.events || (Array.isArray(resData) ? resData : []);
+              events = rawList.map(normalizeRawGammaEvent).filter(e => e.markets && e.markets.length > 0);
+              if (events.length > 0) break;
+            }
+          } catch (e) {
+            // try next
+          }
+        }
+      } else if (currentCategory === "argentina") {
+        // Specifically fetch Argentina and Milei markets via public-search to ensure all are found!
+        const seenIds = new Set();
+        const argQueries = ["argentina", "milei"];
+        for (const aq of argQueries) {
+          try {
+            const resp = await fetch(`/api/gamma/public-search?q=${aq}&events_status=active`);
+            if (resp.ok) {
+              const resData = await resp.json();
+              const rawList = resData.events || [];
+              for (const rev of rawList) {
+                if (!seenIds.has(rev.id)) {
+                  seenIds.add(rev.id);
+                  const norm = normalizeRawGammaEvent(rev);
+                  if (norm.markets && norm.markets.length > 0) {
+                    norm.category = "argentina";
+                    events.push(norm);
+                  }
+                }
+              }
+            }
+          } catch (e) {}
+        }
+      } else {
+        // Standard browse: fetch top active volume events
+        const endpoints = [
+          "/api/gamma/events?limit=80&active=true&closed=false&order=volume24hr&ascending=false",
+          "https://gamma-api.polymarket.com/events?limit=80&active=true&closed=false&order=volume24hr&ascending=false"
+        ];
+
+        for (const endpoint of endpoints) {
+          try {
+            const resp = await fetch(endpoint);
+            if (resp.ok) {
+              const rawData = await resp.json();
+              if (Array.isArray(rawData)) {
+                events = rawData.map(normalizeRawGammaEvent).filter(e => e.markets && e.markets.length > 0);
+                break;
+              }
+            }
+          } catch (err) {
+            // try next endpoint
+          }
+        }
+
+        // Filter client-side if a specific category was selected
+        if (currentCategory !== "all" && currentCategory !== "trending" && currentCategory !== "watchlist") {
+          events = events.filter(e => e.category === currentCategory);
+        }
       }
     }
 
