@@ -188,60 +188,76 @@ def normalize_event(raw_event: dict) -> dict:
 
 
 def get_events(limit: int = 100, category: Optional[str] = None, search: Optional[str] = None) -> List[dict]:
-    """Retrieve and filter active events from Gamma API."""
-    params = {
-        "limit": min(limit, 120),
-        "active": "true",
-        "closed": "false",
-        "order": "volume24hr",
-        "ascending": "false"
-    }
+    """Retrieve and filter active events from Gamma API using /public-search when searching."""
+    raw_events = []
 
-    raw_events = _fetch_with_doh(f"{GAMMA_API_BASE}/events", params=params)
-    
-    # Also fetch top overall volume events to capture broad markets
-    try:
-        top_vol_events = _fetch_with_doh(f"{GAMMA_API_BASE}/events", params={
-            "limit": 40,
+    # 1. If explicit search query is provided, query Polymarket's /public-search endpoint!
+    if search:
+        try:
+            search_res = _fetch_with_doh(f"{GAMMA_API_BASE}/public-search", params={
+                "q": search.strip(),
+                "events_status": "active"
+            })
+            raw_events = search_res.get("events", []) if isinstance(search_res, dict) else []
+        except Exception as e:
+            logger.error(f"Error calling public-search for query '{search}': {e}")
+            raw_events = []
+    elif category == "argentina":
+        # Specifically fetch Argentina & Milei markets via public-search to guarantee full coverage
+        try:
+            seen_ids = set()
+            for q in ["argentina", "milei"]:
+                res = _fetch_with_doh(f"{GAMMA_API_BASE}/public-search", params={
+                    "q": q,
+                    "events_status": "active"
+                })
+                for ev in (res.get("events", []) if isinstance(res, dict) else []):
+                    if ev.get("id") not in seen_ids:
+                        raw_events.append(ev)
+                        seen_ids.add(ev.get("id"))
+        except Exception as e:
+            logger.error(f"Error fetching Argentina markets: {e}")
+    else:
+        # Standard discovery: fetch active events ordered by 24h volume
+        params = {
+            "limit": min(limit, 120),
             "active": "true",
             "closed": "false",
-            "order": "volume",
+            "order": "volume24hr",
             "ascending": "false"
-        })
-        # Deduplicate
-        existing_ids = {e.get("id") for e in raw_events}
-        for e in top_vol_events:
-            if e.get("id") not in existing_ids:
-                raw_events.append(e)
-                existing_ids.add(e.get("id"))
-    except Exception as e:
-        logger.warning(f"Could not fetch supplementary top volume events: {e}")
+        }
+        raw_events = _fetch_with_doh(f"{GAMMA_API_BASE}/events", params=params)
+        
+        # Also fetch top overall volume events to capture broad markets
+        try:
+            top_vol_events = _fetch_with_doh(f"{GAMMA_API_BASE}/events", params={
+                "limit": 40,
+                "active": "true",
+                "closed": "false",
+                "order": "volume",
+                "ascending": "false"
+            })
+            existing_ids = {e.get("id") for e in raw_events}
+            for e in top_vol_events:
+                if e.get("id") not in existing_ids:
+                    raw_events.append(e)
+                    existing_ids.add(e.get("id"))
+        except Exception as e:
+            logger.warning(f"Could not fetch supplementary top volume events: {e}")
 
     # Normalize events
     normalized = []
     for ev in raw_events:
         try:
             norm = normalize_event(ev)
-            # Only include if it has at least one market
             if norm["markets"]:
                 normalized.append(norm)
         except Exception as ex:
             logger.debug(f"Failed to normalize event: {ex}")
 
-    # Category filter
-    if category and category != "all" and category != "trending":
+    # Category filter (if not already handled or for general browsing)
+    if category and category != "all" and category != "trending" and category != "argentina":
         normalized = [e for e in normalized if e["category"] == category]
-
-    # Search filter
-    if search:
-        s = search.lower().strip()
-        filtered = []
-        for e in normalized:
-            title = (e.get("title") or "").lower()
-            markets_text = " ".join([m.get("question", "") for m in e.get("markets", [])]).lower()
-            if s in title or s in markets_text or s in e.get("category", ""):
-                filtered.append(e)
-        normalized = filtered
 
     return normalized
 
